@@ -812,3 +812,19 @@ SELECT * FROM tasks;
 +    total = db.query(TaskModel).count()
 +    return {"message": "Database reset to initial state", "total": total}
 
+<<<<<<< HEAD
+=======
+### Three Concrete Differences & Observations
+
+1. **Payload Handling & Type Safety vs. Raw Dictionaries**:
+   * **Hand-Built Version (`main.py`)**: Utilized direct Pydantic models in endpoint signatures (`task: TaskCreate`, `task: TaskUpdate`), allowing FastAPI to automatically validate schemas, handle type casting, and document request bodies accurately in Swagger UI.
+   * **AI Version (`ai-version/main.py`)**: Defined Pydantic models at the top (`TaskItem`, `TaskCreatePayload`) but bypassed them in endpoint function signatures by accepting generic `payload: Dict[str, object]`. It then implemented verbose manual `isinstance()` checks and `.strip()` string validations inside the route handlers.
+
+2. **Error Handling Architecture**:
+   * **Hand-Built Version**: Handled error scenarios cleanly using status-code-bound exceptions with concise error dict payloads.
+   * **AI Version**: Injected custom nested error dictionaries into `HTTPException(detail={"error": "..."})` across every validation checkpoint, resulting in `{ "detail": { "error": "..." } }` wrapped payloads instead of standard top-level JSON fields.
+
+3. **Data Mutation & State Management**:
+   * **Hand-Built Version**: Separated list mutations and indexing cleanly with standard Python list comprehensions and counter management.
+   * **AI Version**: Relied on `global id_counter` and `global task_repository` statements within mutable routes like `/reset` and `/tasks` POST, introducing procedural state mutation rather than modular store encapsulation.
+>>>>>>> 14e49a586065827727f0936283f8a223549dcffd
