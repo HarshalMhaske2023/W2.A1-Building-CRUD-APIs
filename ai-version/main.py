@@ -1,143 +1,205 @@
 """
-AI-Generated Alternate Version of FastAPI Task Management REST API (Stage 7)
+AI-Generated Alternate Version of FastAPI Task Management REST API (Stage 6 Bonus)
 
-This alternate implementation uses a distinct architectural layout, custom exception
-handlers, different variable naming conventions, and alternate Pydantic schemas.
+Architectural Approach:
+- Utilizes SQLAlchemy ORM instead of raw sqlite3 string queries.
+- Manages connection lifecycle via FastAPI Dependency Injection (`Depends(get_db)` generator pattern).
+- Defines a declarative ORM mapping (`TaskModel`) cleanly decoupled from Pydantic schemas.
+- Handles database transactions safely with automatic rollback on errors.
 """
 
-from typing import Dict, List, Optional
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
+from typing import Generator, List, Optional
 
-# Initialize FastAPI instance
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, status
+from pydantic import BaseModel, Field
+from sqlalchemy import Boolean, Column, Integer, String, create_engine
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+DATABASE_URL = "sqlite:///./tasks.db"
+
+# Create SQLAlchemy engine & SessionLocal factory
+engine = create_engine(
+    DATABASE_URL, connect_args={"check_same_thread": False}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+# Declarative Base for ORM Models
+class Base(DeclarativeBase):
+    pass
+
+
+class TaskModel(Base):
+    """SQLAlchemy ORM Task entity mapping to 'tasks' table."""
+
+    __tablename__ = "tasks"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    title = Column(String, nullable=False)
+    done = Column(Boolean, default=False, nullable=False)
+
+
+# ------------------------------------------------------------------------------
+# Dependency Injection for Database Session
+# ------------------------------------------------------------------------------
+def get_db() -> Generator[Session, None, None]:
+    """Provides transactional scope around a series of operations."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db() -> None:
+    """Initializes tables and seeds initial tasks if empty."""
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        if db.query(TaskModel).count() == 0:
+            initial_tasks = [
+                TaskModel(id=1, title="Complete Week 2 backend assignment", done=False),
+                TaskModel(id=2, title="Review REST status codes", done=True),
+                TaskModel(id=3, title="Push 6 commits to GitHub", done=False),
+            ]
+            db.add_all(initial_tasks)
+            db.commit()
+    finally:
+        db.close()
+
+
+# ------------------------------------------------------------------------------
+# FastAPI Lifespan Handler
+# ------------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager to ensure database setup on startup."""
+    init_db()
+    yield
+
+
 app = FastAPI(
-    title="Task Management System - AI Edition",
-    version="2.0.0",
-    description="Alternate FastAPI implementation for AI vs Human code comparison.",
+    title="Task API - AI ORM Edition",
+    version="2.0",
+    description="Alternative FastAPI implementation utilizing SQLAlchemy ORM and Dependency Injection.",
+    lifespan=lifespan,
 )
 
-# ------------------------------------------------------------------------------
-# Alternate In-Memory Store & Global Counter
-# ------------------------------------------------------------------------------
-task_repository: List[Dict[str, object]] = [
-    {"id": 1, "title": "Complete Week 2 backend assignment", "done": False},
-    {"id": 2, "title": "Review REST status codes", "done": True},
-    {"id": 3, "title": "Push 6 commits to GitHub", "done": False},
-]
-
-id_counter: int = 4
-
 
 # ------------------------------------------------------------------------------
-# Alternate Pydantic Models
+# Pydantic Schemas for API Requests & Responses
 # ------------------------------------------------------------------------------
-class TaskItem(BaseModel):
-    """Primary task entity model."""
-    id: int = Field(..., description="Unique ID assigned by database")
-    title: str = Field(..., description="Description of task to be performed")
-    done: bool = Field(False, description="Task completion status flag")
+class TaskRead(BaseModel):
+    id: int
+    title: str
+    done: bool
+
+    class Config:
+        from_attributes = True
 
 
-class TaskCreatePayload(BaseModel):
-    """Payload schema for creating a new task."""
-    title: str = Field(..., min_length=1, description="Title string must not be empty")
+class TaskCreate(BaseModel):
+    title: str = Field(..., min_length=1)
 
 
-class TaskUpdatePayload(BaseModel):
-    """Payload schema for updating existing task."""
-    title: Optional[str] = Field(None, description="Optional updated title string")
-    done: Optional[bool] = Field(None, description="Optional updated completion status")
+class TaskUpdate(BaseModel):
+    title: Optional[str] = Field(None)
+    done: Optional[bool] = Field(None)
+
+
+class StatsResponse(BaseModel):
+    total: int
+    done: int
+    open: int
+
+
+class ResetResponse(BaseModel):
+    message: str
+    total: int
 
 
 # ------------------------------------------------------------------------------
-# Endpoints
+# REST API Endpoints
 # ------------------------------------------------------------------------------
 @app.get("/", status_code=status.HTTP_200_OK)
-def read_root() -> Dict[str, object]:
-    """Root endpoint detailing service name and version."""
-    return {
-        "name": "Task API",
-        "version": "1.0",
-        "endpoints": ["/tasks"],
-    }
+def read_root():
+    return {"name": "Task API", "version": "1.0", "endpoints": ["/tasks"]}
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
-def check_health() -> Dict[str, str]:
-    """Health check route."""
+def check_health():
     return {"status": "ok"}
 
 
-@app.get("/tasks", status_code=status.HTTP_200_OK)
-def fetch_all_tasks(
-    done: Optional[bool] = None,
-    search: Optional[str] = None,
-) -> List[Dict[str, object]]:
-    """Retrieve task list with optional filtering by completion status or search term."""
-    items = task_repository
-
+@app.get("/tasks", response_model=List[TaskRead], status_code=status.HTTP_200_OK)
+def list_tasks(
+    done: Optional[bool] = Query(None),
+    search: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(TaskModel)
     if done is not None:
-        items = [item for item in items if item["done"] == done]
-
+        query = query.filter(TaskModel.done == done)
     if search is not None:
-        term = search.lower()
-        items = [item for item in items if term in str(item["title"]).lower()]
-
-    return items
+        query = query.filter(TaskModel.title.ilike(f"%{search}%"))
+    return query.all()
 
 
-@app.get("/stats", status_code=status.HTTP_200_OK)
-def fetch_stats() -> Dict[str, int]:
-    """Retrieve summary statistics of tasks."""
-    total_count = len(task_repository)
-    completed_count = sum(1 for item in task_repository if item["done"] is True)
-    pending_count = total_count - completed_count
-    return {
-        "total": total_count,
-        "done": completed_count,
-        "open": pending_count,
-    }
+@app.get("/stats", response_model=StatsResponse, status_code=status.HTTP_200_OK)
+def get_stats(db: Session = Depends(get_db)):
+    total = db.query(TaskModel).count()
+    completed = db.query(TaskModel).filter(TaskModel.done == True).count()
+    return {"total": total, "done": completed, "open": total - completed}
 
 
-@app.get("/tasks/{task_id}", status_code=status.HTTP_200_OK)
-def fetch_task_by_id(task_id: int) -> Dict[str, object]:
-    """Fetch single task by ID or return 404."""
-    for item in task_repository:
-        if item["id"] == task_id:
-            return item
+@app.get("/tasks/{id}", response_model=TaskRead, status_code=status.HTTP_200_OK)
+def get_task(
+    id: int = Path(...),
+    db: Session = Depends(get_db),
+):
+    task = db.query(TaskModel).filter(TaskModel.id == id).first()
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Task {id} not found"},
+        )
+    return task
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail={"error": f"Task {task_id} not found"},
-    )
 
-
-@app.post("/tasks", status_code=status.HTTP_201_CREATED)
-def add_new_task(payload: Dict[str, object]) -> Dict[str, object]:
-    """Create a new task with validation."""
-    global id_counter
-
-    if "title" not in payload or not isinstance(payload["title"], str) or not payload["title"].strip():
+@app.post("/tasks", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
+def create_task(
+    payload: TaskCreate,
+    db: Session = Depends(get_db),
+):
+    clean_title = payload.title.strip()
+    if not clean_title:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Title is required and cannot be empty"},
         )
-
-    record = {
-        "id": id_counter,
-        "title": payload["title"].strip(),
-        "done": False,
-    }
-    id_counter += 1
-    task_repository.append(record)
-    return record
+    new_task = TaskModel(title=clean_title, done=False)
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
+    return new_task
 
 
-@app.put("/tasks/{task_id}", status_code=status.HTTP_200_OK)
-def update_existing_task(task_id: int, payload: Dict[str, object]) -> Dict[str, object]:
-    """Update task fields by ID."""
-    has_title = "title" in payload and payload["title"] is not None
-    has_done = "done" in payload and payload["done"] is not None
+@app.put("/tasks/{id}", response_model=TaskRead, status_code=status.HTTP_200_OK)
+def update_task(
+    id: int,
+    payload: TaskUpdate,
+    db: Session = Depends(get_db),
+):
+    task = db.query(TaskModel).filter(TaskModel.id == id).first()
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Task {id} not found"},
+        )
+
+    has_title = payload.title is not None
+    has_done = payload.done is not None
 
     if not has_title and not has_done:
         raise HTTPException(
@@ -145,57 +207,50 @@ def update_existing_task(task_id: int, payload: Dict[str, object]) -> Dict[str, 
             detail={"error": "Invalid update payload"},
         )
 
-    if has_title and (not isinstance(payload["title"], str) or not payload["title"].strip()):
+    if has_title:
+        clean_title = payload.title.strip()
+        if not clean_title:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Invalid update payload"},
+            )
+        task.title = clean_title
+
+    if has_done:
+        task.done = payload.done
+
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@app.delete("/tasks/{id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(
+    id: int,
+    db: Session = Depends(get_db),
+):
+    task = db.query(TaskModel).filter(TaskModel.id == id).first()
+    if not task:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "Invalid update payload"},
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Task {id} not found"},
         )
-
-    if has_done and not isinstance(payload["done"], bool):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "Invalid update payload"},
-        )
-
-    for item in task_repository:
-        if item["id"] == task_id:
-            if has_title:
-                item["title"] = str(payload["title"]).strip()
-            if has_done:
-                item["done"] = bool(payload["done"])
-            return item
-
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail={"error": f"Task {task_id} not found"},
-    )
+    db.delete(task)
+    db.commit()
+    return None
 
 
-@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_task(task_id: int) -> None:
-    """Delete task by ID."""
-    for index, item in enumerate(task_repository):
-        if item["id"] == task_id:
-            task_repository.pop(index)
-            return
+@app.post("/reset", response_model=ResetResponse, status_code=status.HTTP_200_OK)
+def reset_database(db: Session = Depends(get_db)):
+    db.query(TaskModel).delete()
+    db.commit()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail={"error": f"Task {task_id} not found"},
-    )
-
-
-@app.post("/reset", status_code=status.HTTP_200_OK)
-def reset_repository() -> Dict[str, object]:
-    """Reset repository back to initial state."""
-    global task_repository, id_counter
-    task_repository = [
-        {"id": 1, "title": "Complete Week 2 backend assignment", "done": False},
-        {"id": 2, "title": "Review REST status codes", "done": True},
-        {"id": 3, "title": "Push 6 commits to GitHub", "done": False},
+    initial_tasks = [
+        TaskModel(id=1, title="Complete Week 2 backend assignment", done=False),
+        TaskModel(id=2, title="Review REST status codes", done=True),
+        TaskModel(id=3, title="Push 6 commits to GitHub", done=False),
     ]
-    id_counter = 4
-    return {
-        "message": "Database reset to initial state",
-        "total": len(task_repository),
-    }
+    db.add_all(initial_tasks)
+    db.commit()
+    total = db.query(TaskModel).count()
+    return {"message": "Database reset to initial state", "total": total}
